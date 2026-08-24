@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Accordeur Guitare Electrique</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#1a1a2e;color:#e0e0e0;font-family:'Segoe UI',Tahoma,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;overflow:hidden}
+
+  .tuner-container{width:420px;padding:30px 20px;background:linear-gradient(145deg,#16213e,#0f3460);border-radius:20px;box-shadow:0 10px 40px rgba(0,0,0,.6);text-align:center;border:1px solid #1a1a4e}
+
+  .title{font-size:14px;text-transform:uppercase;letter-spacing:4px;color:#7f8c8d;margin-bottom:20px}
+
+  /* String labels */
+  .strings{display:flex;justify-content:center;gap:10px;margin-bottom:15px}
+  .string-label{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:bold;background:#0a0a1a;color:#555;border:2px solid #333;transition:all .15s}
+  .string-label.active{color:#00d4ff;border-color:#00d4ff;background:#001a33;box-shadow:0 0 15px rgba(0,212,255,.3)}
+  .string-label.in-tune{color:#2ecc71;border-color:#2ecc71;background:#0a261a;box-shadow:0 0 15px rgba(46,204,113,.3)}
+
+  /* Frequency & note display */
+  .note-display{margin:10px 0;font-size:52px;font-weight:900;color:#fff;min-height:60px;transition:color .15s}
+  .note-display.flat{color:#e67e22}
+  .note-display.sharp{color:#e67e22}
+  .note-display.intune{color:#2ecc71}
+  .freq-display{font-size:13px;color:#7f8c8d;margin-bottom:5px;min-height:18px}
+  .cents-display{font-size:14px;color:#95a5a6;margin-bottom:15px;min-height:18px}
+
+  /* Analog needle */
+  .needle-wrap{position:relative;width:380px;height:110px;margin:0 auto}
+  .needle-canvas{width:380px;height:110px}
+
+  /* Status text */
+  .status{margin-top:15px;font-size:22px;font-weight:700;letter-spacing:2px;min-height:30px;transition:color .15s}
+  .status.flat{color:#e67e22}
+  .status.sharp{color:#e67e22}
+  .status.intune{color:#2ecc71}
+
+  /* Start button */
+  .start-btn{margin-top:20px;padding:12px 40px;font-size:15px;border:none;border-radius:30px;cursor:pointer;background:linear-gradient(135deg,#00d4ff,#0088cc);color:#fff;font-weight:600;letter-spacing:1px;transition:all .3s}
+  .start-btn:hover{transform:scale(1.05);box-shadow:0 4px 20px rgba(0,212,255,.4)}
+  .start-btn.running{background:linear-gradient(135deg,#e74c3c,#c0392b)}
+
+  /* Reference display */
+  .ref{margin-top:12px;font-size:11px;color:#555}
+</style>
+</head>
+<body>
+<div class="tuner-container">
+  <div class="title">Accordeur Guitare</div>
+
+  <div class="strings" id="strings">
+    <div class="string-label" data-str="E2" data-freq="82.41">E</div>
+    <div class="string-label" data-str="A2" data-freq="110.00">A</div>
+    <div class="string-label" data-str="D3" data-freq="146.83">D</div>
+    <div class="string-label" data-str="G3" data-freq="196.00">G</div>
+    <div class="string-label" data-str="B3" data-freq="246.94">B</div>
+    <div class="string-label" data-str="E4" data-freq="329.63">e</div>
+  </div>
+
+  <div class="freq-display" id="freqDisplay"></div>
+  <div class="note-display" id="noteDisplay">--</div>
+  <div class="cents-display" id="centsDisplay"></div>
+
+  <div class="needle-wrap">
+    <canvas class="needle-canvas" id="needleCanvas" width="760" height="220"></canvas>
+  </div>
+
+  <div class="status" id="status">APPUYEZ POUR COMMENCER</div>
+
+  <button class="start-btn" id="startBtn">Demarrer</button>
+
+  <div class="ref">Reference A4 = 440 Hz &middot; E A D G B e</div>
+</div>
+
+<script>
+const STRINGS = [
+  { name: 'E2', note: 'E', freq: 82.41, midi: 40 },
+  { name: 'A2', note: 'A', freq: 110.00, midi: 45 },
+  { name: 'D3', note: 'D', freq: 146.83, midi: 50 },
+  { name: 'G3', note: 'G', freq: 196.00, midi: 55 },
+  { name: 'B3', note: 'B', freq: 246.94, midi: 59 },
+  { name: 'E4', note: 'e', freq: 329.63, midi: 64 }
+];
+
+const A4 = 440;
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+let audioCtx, analyser, source, stream;
+let running = false;
+let smoothedCents = 0;
+let animId;
+
+const freqDisplay = document.getElementById('freqDisplay');
+const noteDisplay = document.getElementById('noteDisplay');
+const centsDisplay = document.getElementById('centsDisplay');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const canvas = document.getElementById('needleCanvas');
+const ctx = canvas.getContext('2d');
+
+function midiToFreq(midi) {
+  return A4 * Math.pow(2, (midi - 69) / 12);
+}
+
+function freqToMidi(freq) {
+  return 69 + 12 * Math.log2(freq / A4);
+}
+
+function findClosestString(freq) {
+  let closest = null;
+  let minDist = Infinity;
+  for (const s of STRINGS) {
+    const dist = Math.abs(freq - s.freq);
+    if (dist < minDist) { minDist = dist; closest = s; }
+  }
+  return closest;
+}
+
+function centsOff(freq, targetFreq) {
+  if (freq <= 0 || targetFreq <= 0) return 0;
+  return 1200 * Math.log2(freq / targetFreq);
+}
+
+// --- Autocorrelation pitch detection ---
+function autoCorrelate(buf, sampleRate) {
+  const SIZE = buf.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < 0.01) return -1;
+
+  let r1 = 0, r2 = SIZE - 1;
+  const thres = 0.2;
+  for (let i = 0; i < SIZE / 2; i++) {
+    if (Math.abs(buf[i]) < thres) { r1 = i; break; }
+  }
+  for (let i = 1; i < SIZE / 2; i++) {
+    if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; }
+  }
+
+  buf = buf.slice(r1, r2);
+  const newSize = buf.length;
+  const c = new Float32Array(newSize);
+  for (let i = 0; i < newSize; i++) {
+    for (let j = 0; j < newSize - i; j++) {
+      c[i] += buf[j] * buf[j + i];
+    }
+  }
+
+  let d = 0;
+  while (c[d] > c[d + 1]) d++;
+  let maxval = -1;
+  let maxpos = -1;
+  for (let i = d; i < newSize - 1; i++) {
+    if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
+  }
+  let T0 = maxpos;
+
+  // Parabolic interpolation
+  const x1 = c[T0 - 1] || 0;
+  const x2 = c[T0];
+  const x3 = c[T0 + 1] || 0;
+  const a = (x1 + x3 - 2 * x2) / 2;
+  const b = (x3 - x1) / 2;
+  if (a) T0 = T0 - b / (2 * a);
+
+  return sampleRate / T0;
+}
+
+// --- Draw analog needle ---
+function drawNeedle(cents, detected) {
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const cx = W / 2;
+  const cy = H - 20;
+  const radius = 160;
+
+  // Gauge arc
+  const startAngle = Math.PI;
+  const endAngle = 2 * Math.PI;
+
+  // Background arc
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, startAngle, endAngle);
+  ctx.lineWidth = 30;
+  ctx.strokeStyle = '#0a0a1a';
+  ctx.stroke();
+
+  // Colored zones
+  const drawZone = (from, to, color) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, from, to);
+    ctx.lineWidth = 30;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  };
+
+  // -50 to -15: orange, -15 to +15: green, +15 to +50: orange
+  const mapCents = (c) => Math.PI + ((c + 50) / 100) * Math.PI;
+  drawZone(mapCents(-50), mapCents(-15), '#e67e22');
+  drawZone(mapCents(-15), mapCents(15), '#2ecc71');
+  drawZone(mapCents(15), mapCents(50), '#e67e22');
+
+  // Tick marks
+  ctx.fillStyle = '#ccc';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.textAlign = 'center';
+  const ticks = [-50,-40,-30,-20,-10,0,10,20,30,40,50];
+  ticks.forEach(c => {
+    const angle = Math.PI + ((c + 50) / 100) * Math.PI;
+    const inner = radius - 22;
+    const outer = radius + 22;
+    const x1 = cx + inner * Math.cos(angle);
+    const y1 = cy + inner * Math.sin(angle);
+    const x2 = cx + outer * Math.cos(angle);
+    const y2 = cy + outer * Math.sin(angle);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineWidth = c === 0 ? 3 : 1;
+    ctx.strokeStyle = '#666';
+    ctx.stroke();
+
+    if (c % 20 === 0 || c === 0) {
+      const lx = cx + (outer + 18) * Math.cos(angle);
+      const ly = cy + (outer + 18) * Math.sin(angle);
+      ctx.fillText(c + 'c', lx, ly);
+    }
+  });
+
+  // Labels
+  ctx.fillStyle = '#e67e22';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('BEMOL', cx - 85, cy - radius + 40);
+  ctx.fillStyle = '#2ecc71';
+  ctx.fillText('JUSTE', cx, cy - radius + 40);
+  ctx.fillStyle = '#e67e22';
+  ctx.fillText('DIESE', cx + 85, cy - radius + 40);
+
+  // Needle
+  const clampedCents = Math.max(-50, Math.min(50, cents));
+  const needleAngle = Math.PI + ((clampedCents + 50) / 100) * Math.PI;
+  const needleLen = radius - 30;
+
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + needleLen * Math.cos(needleAngle), cy + needleLen * Math.sin(needleAngle));
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = detected ? '#fff' : '#444';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // Center dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 8, 0, 2 * Math.PI);
+  ctx.fillStyle = detected ? '#fff' : '#333';
+  ctx.fill();
+}
+
+// --- Update UI ---
+function updateUI(freq) {
+  if (freq <= 0) {
+    noteDisplay.textContent = '--';
+    noteDisplay.className = 'note-display';
+    freqDisplay.textContent = '';
+    centsDisplay.textContent = '';
+    statusEl.textContent = 'ECOUTE...';
+    statusEl.className = 'status';
+    drawNeedle(0, false);
+    clearStringHighlights();
+    return;
+  }
+
+  const closest = findClosestString(freq);
+  const cents = centsOff(freq, closest.freq);
+  smoothedCents += (cents - smoothedCents) * 0.3;
+
+  freqDisplay.textContent = freq.toFixed(1) + ' Hz';
+
+  const noteIdx = Math.round(freqToMidi(freq)) % 12;
+  const octave = Math.floor(freqToMidi(freq) / 12) - 1;
+  noteDisplay.textContent = NOTE_NAMES[noteIdx] + octave;
+
+  const roundedCents = Math.round(smoothedCents);
+  const sign = roundedCents > 0 ? '+' : '';
+  centsDisplay.textContent = sign + roundedCents + ' cents';
+
+  // Highlight active string
+  clearStringHighlights();
+  const strEl = document.querySelector(`.string-label[data-str="${closest.name}"]`);
+  if (strEl) {
+    if (Math.abs(smoothedCents) <= 5) {
+      strEl.classList.add('in-tune');
+    } else {
+      strEl.classList.add('active');
+    }
+  }
+
+  // Status
+  const absCents = Math.abs(smoothedCents);
+  if (absCents <= 5) {
+    noteDisplay.className = 'note-display intune';
+    statusEl.textContent = 'JUSTE !';
+    statusEl.className = 'status intune';
+  } else if (smoothedCents < 0) {
+    noteDisplay.className = 'note-display flat';
+    statusEl.textContent = 'BEMOL (' + Math.abs(roundedCents) + 'c bas)';
+    statusEl.className = 'status flat';
+  } else {
+    noteDisplay.className = 'note-display sharp';
+    statusEl.textContent = 'DIESE (' + Math.abs(roundedCents) + 'c haut)';
+    statusEl.className = 'status sharp';
+  }
+
+  drawNeedle(smoothedCents, true);
+}
+
+function clearStringHighlights() {
+  document.querySelectorAll('.string-label').forEach(el => {
+    el.classList.remove('active', 'in-tune');
+  });
+}
+
+// --- Audio loop ---
+function processAudio() {
+  if (!running) return;
+
+  const buf = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+
+  const freq = autoCorrelate(buf, audioCtx.sampleRate);
+
+  if (freq > 50 && freq < 1200) {
+    updateUI(freq);
+  } else {
+    updateUI(-1);
+  }
+
+  animId = requestAnimationFrame(processAudio);
+}
+
+// --- Start / Stop ---
+startBtn.addEventListener('click', async () => {
+  if (running) {
+    running = false;
+    cancelAnimationFrame(animId);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (source) source.disconnect();
+    startBtn.textContent = 'Demarrer';
+    startBtn.classList.remove('running');
+    statusEl.textContent = 'ARRETE';
+    noteDisplay.textContent = '--';
+    noteDisplay.className = 'note-display';
+    freqDisplay.textContent = '';
+    centsDisplay.textContent = '';
+    clearStringHighlights();
+    drawNeedle(0, false);
+    return;
+  }
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 1
+      }
+    });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0;
+    source.connect(analyser);
+
+    running = true;
+    startBtn.textContent = 'Arreter';
+    startBtn.classList.add('running');
+    processAudio();
+  } catch (e) {
+    statusEl.textContent = 'ERREUR MIKRO';
+    console.error(e);
+  }
+});
+
+// Initial draw
+drawNeedle(0, false);
+</script>
+</body>
+</html>
